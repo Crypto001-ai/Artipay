@@ -9,6 +9,9 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+        'cross-fetch': path.resolve(__dirname, 'src/fetch-shim.ts'),
+        'cross-fetch/polyfill': path.resolve(__dirname, 'src/fetch-shim.ts'),
+        'cross-fetch/dist/browser-ponyfill.js': path.resolve(__dirname, 'src/fetch-shim.ts'),
       },
     },
     server: {

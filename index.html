@@ -12,6 +12,33 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
+          if (currentFetch) {
+            try {
+              Object.defineProperty(window, 'fetch', {
+                value: currentFetch,
+                writable: true,
+                configurable: true,
+                enumerable: true,
+              });
+            } catch (e) {}
+            try {
+              if (typeof Window !== 'undefined' && Window.prototype) {
+                Object.defineProperty(Window.prototype, 'fetch', {
+                  value: currentFetch,
+                  writable: true,
+                  configurable: true,
+                  enumerable: true,
+                });
+              }
+            } catch (e) {}
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body class="bg-white text-slate-900 antialiased selection:bg-emerald-600 selection:text-white">
     <div id="root"></div>

@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import './polyfills.ts';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Connection,
   PublicKey,
@@ -11,6 +12,13 @@ import {
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
+import {
+  WalletAdapterNetwork,
+  WalletReadyState,
+  type SignerWalletAdapter,
+} from '@solana/wallet-adapter-base';
+import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
+import { SolflareWalletAdapter } from '@solana/wallet-adapter-solflare';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Check,
@@ -44,27 +52,6 @@ const connection = new Connection(DEVNET_RPC_URL, 'confirmed');
 // ============================================================================
 // TYPES
 // ============================================================================
-
-interface PhantomProvider {
-  isPhantom?: boolean;
-  publicKey?: PublicKey | { toString(): string; toBase58(): string };
-  isConnected?: boolean;
-  connect: (opts?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: PublicKey }>;
-  disconnect: () => Promise<void>;
-  signAndSendTransaction: (
-    transaction: Transaction,
-    options?: { skipPreflight?: boolean }
-  ) => Promise<{ signature: string }>;
-}
-
-declare global {
-  interface Window {
-    solana?: PhantomProvider;
-    phantom?: {
-      solana?: PhantomProvider;
-    };
-  }
-}
 
 export interface Artisan {
   id: string;
@@ -136,14 +123,6 @@ function shortenAddress(address: string, chars = 4): string {
   return `${address.slice(0, chars)}...${address.slice(-chars)}`;
 }
 
-// Find Phantom wallet in the browser (never asks for private keys)
-function getPhantomProvider(): PhantomProvider | null {
-  if (typeof window === 'undefined') return null;
-  if (window.phantom?.solana?.isPhantom) return window.phantom.solana;
-  if (window.solana?.isPhantom) return window.solana;
-  return null;
-}
-
 // Build a Solana Pay URL (solana:<address>?amount=...)
 function buildSolanaPayUrl(artisan: Artisan, recipientAddress: string): string {
   const solAmount = ngnToSol(artisan.priceNgn);
@@ -157,12 +136,27 @@ function buildSolanaPayUrl(artisan: Artisan, recipientAddress: string): string {
 
 export default function App() {
   const [selectedArtisan, setSelectedArtisan] = useState<Artisan>(ARTISANS[0]);
+
+  // Instantiate Phantom and Solflare wallet adapters for Devnet
+  const wallets = useMemo<SignerWalletAdapter[]>(
+    () => [
+      new PhantomWalletAdapter(),
+      new SolflareWalletAdapter({ network: WalletAdapterNetwork.Devnet }),
+    ],
+    []
+  );
+
+  const [activeAdapter, setActiveAdapter] = useState<SignerWalletAdapter | null>(null);
+  const [walletName, setWalletName] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const [showWalletPopup, setShowWalletPopup] = useState<boolean>(false);
 
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [realErrorText, setRealErrorText] = useState<string | null>(null);
+  const [showInstallLink, setShowInstallLink] = useState<boolean>(false);
   const [latestReceipt, setLatestReceipt] = useState<PaymentReceipt | null>(null);
   const [showQrPopup, setShowQrPopup] = useState<boolean>(false);
 
@@ -181,26 +175,11 @@ export default function App() {
     try {
       const pubKey = new PublicKey(address);
       const lamports = await connection.getBalance(pubKey, 'confirmed');
-      setSolBalance(Number(lamports) / Number(LAMPORTS_PER_SOL));
-    } catch {
-      // Keep previous balance if RPC request fails briefly
+      setSolBalance(lamports / LAMPORTS_PER_SOL);
+    } catch (err) {
+      console.error('Balance fetch error:', err);
     }
   }, []);
-
-  // Reconnect automatically if the user already trusted this app in Phantom
-  useEffect(() => {
-    const provider = getPhantomProvider();
-    if (!provider) return;
-
-    provider
-      .connect({ onlyIfTrusted: true })
-      .then(({ publicKey }) => {
-        const address = publicKey.toString();
-        setWalletAddress(address);
-        fetchSolBalance(address);
-      })
-      .catch(() => {});
-  }, [fetchSolBalance]);
 
   // Save receipts to localStorage whenever paymentHistory changes
   useEffect(() => {
@@ -211,107 +190,165 @@ export default function App() {
     }
   }, [paymentHistory]);
 
-  // Connect to Phantom wallet
-  const handleConnectPhantom = async () => {
-    setErrorMessage(null);
-    const provider = getPhantomProvider();
+  // Check if a wallet adapter is installed in the browser
+  const isWalletInstalled = (adapter: SignerWalletAdapter): boolean => {
+    if (
+      adapter.readyState === WalletReadyState.Installed ||
+      adapter.readyState === WalletReadyState.Loadable
+    ) {
+      return true;
+    }
+    const win = window as unknown as {
+      solana?: { isPhantom?: boolean };
+      phantom?: { solana?: { isPhantom?: boolean } };
+      solflare?: { isSolflare?: boolean };
+    };
+    if (adapter.name === 'Phantom') {
+      return Boolean(win.phantom?.solana?.isPhantom || win.solana?.isPhantom);
+    }
+    if (adapter.name === 'Solflare') {
+      return Boolean(win.solflare?.isSolflare);
+    }
+    return false;
+  };
 
-    if (!provider) {
-      setErrorMessage('Phantom wallet is not installed.');
+  // Connect to the chosen wallet adapter (Phantom or Solflare)
+  const handleSelectWallet = async (adapter: SignerWalletAdapter) => {
+    setErrorMessage(null);
+    setRealErrorText(null);
+    setShowInstallLink(false);
+
+    if (!isWalletInstalled(adapter)) {
+      setShowWalletPopup(false);
+      setShowInstallLink(true);
+      setErrorMessage('Install Phantom or Solflare');
+      setRealErrorText(`${adapter.name} wallet extension was not detected in this browser.`);
       return;
     }
 
     setIsConnecting(true);
     try {
-      const response = await provider.connect();
-      const address = response.publicKey.toString();
+      await adapter.connect();
+      const pubKey = adapter.publicKey;
+      if (!pubKey) {
+        throw new Error('No public key returned from wallet adapter.');
+      }
+
+      const address = pubKey.toBase58();
+      setActiveAdapter(adapter);
+      setWalletName(adapter.name);
       setWalletAddress(address);
+      setShowWalletPopup(false);
       await fetchSolBalance(address);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message.toLowerCase() : '';
-      const code = (err as { code?: number })?.code;
-      if (code === 4001 || msg.includes('reject') || msg.includes('cancel')) {
+      console.error('Wallet connection error:', err);
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const lower = rawMsg.toLowerCase();
+
+      setShowWalletPopup(false);
+      setRealErrorText(rawMsg);
+
+      if (lower.includes('reject') || lower.includes('cancel') || lower.includes('4001')) {
         setErrorMessage('You cancelled the request.');
+      } else if (lower.includes('not installed') || lower.includes('not found')) {
+        setShowInstallLink(true);
+        setErrorMessage('Install Phantom or Solflare');
       } else {
-        setErrorMessage('Could not connect to Phantom.');
+        setErrorMessage('Could not connect wallet.');
       }
     } finally {
       setIsConnecting(false);
     }
   };
 
-  // Disconnect Phantom wallet
+  // Disconnect active wallet adapter
   const handleDisconnect = async () => {
-    const provider = getPhantomProvider();
-    if (provider) {
+    if (activeAdapter) {
       try {
-        await provider.disconnect();
-      } catch {}
+        await activeAdapter.disconnect();
+      } catch (err) {
+        console.error('Wallet disconnect error:', err);
+      }
     }
+    setActiveAdapter(null);
+    setWalletName(null);
     setWalletAddress(null);
     setSolBalance(null);
     setErrorMessage(null);
+    setRealErrorText(null);
+    setShowInstallLink(false);
   };
 
   // Build, sign, send, and confirm a Solana Devnet transfer
   const handlePay = async () => {
     setErrorMessage(null);
-
-    const provider = getPhantomProvider();
-    if (!provider) {
-      setPaymentStatus('failed');
-      setErrorMessage('Phantom wallet is not installed.');
-      return;
-    }
-
-    if (!walletAddress) {
-      setPaymentStatus('failed');
-      setErrorMessage('Connect your Phantom wallet first.');
-      return;
-    }
-
-    const solAmount = ngnToSol(selectedArtisan.priceNgn);
-    const lamportsToSend = Math.round(solAmount * Number(LAMPORTS_PER_SOL));
-    const feeLamports = 5000;
+    setRealErrorText(null);
+    setShowInstallLink(false);
 
     try {
-      const recipientPubkey = new PublicKey(ARTISAN_WALLET.trim());
-      const senderPubkey = new PublicKey(walletAddress);
+      // 1. Ensure a wallet is connected
+      if (!activeAdapter || !walletAddress || !activeAdapter.publicKey) {
+        throw new Error('Wallet not connected. Please connect Phantom or Solflare first.');
+      }
 
-      // Check Devnet SOL balance before sending
-      const rawLamports = await connection.getBalance(senderPubkey, 'confirmed');
-      const currentLamports = Number(rawLamports);
-      setSolBalance(currentLamports / Number(LAMPORTS_PER_SOL));
-
-      if (currentLamports < lamportsToSend + feeLamports) {
+      // 2. Validate ARTISAN_WALLET with new PublicKey() inside try/catch
+      let recipientPubkey: PublicKey;
+      try {
+        recipientPubkey = new PublicKey(ARTISAN_WALLET.trim());
+      } catch (pubKeyErr: unknown) {
+        console.error('Invalid ARTISAN_WALLET address:', pubKeyErr);
+        const detail =
+          pubKeyErr instanceof Error ? pubKeyErr.message : String(pubKeyErr);
         setPaymentStatus('failed');
-        setErrorMessage('You do not have enough SOL for this payment.');
+        setErrorMessage('Invalid artisan wallet address.');
+        setRealErrorText(detail);
         return;
       }
 
-      // 1. Waiting for user approval in Phantom
+      const senderPubkey = activeAdapter.publicKey;
+      const sol = ngnToSol(selectedArtisan.priceNgn);
+      const lamports = Math.round(sol * LAMPORTS_PER_SOL);
+      const feeLamports = 5000;
+
+      // 3. Check the balance first and show "Not enough SOL" if it is too low
+      const currentLamports = await connection.getBalance(senderPubkey, 'confirmed');
+      const currentSol = currentLamports / LAMPORTS_PER_SOL;
+      setSolBalance(currentSol);
+
+      if (currentLamports < lamports + feeLamports) {
+        const lowBalanceErr = new Error(
+          `Balance is ${currentSol.toFixed(4)} SOL (${currentLamports} lamports), need ${sol} SOL (${lamports} lamports) + ${feeLamports} fee lamports.`
+        );
+        console.error('Insufficient balance:', lowBalanceErr);
+        setPaymentStatus('failed');
+        setErrorMessage('Not enough SOL');
+        setRealErrorText(lowBalanceErr.message);
+        return;
+      }
+
+      // 4. Waiting for user approval in wallet
       setPaymentStatus('waiting_for_approval');
 
-      // 2. Get recent blockhash from Devnet
+      // 5. Get the latest blockhash from Devnet
       const { blockhash, lastValidBlockHeight } =
         await connection.getLatestBlockhash('confirmed');
 
-      // 3. Create SystemProgram.transfer instruction
+      // 6. Build the transfer with SystemProgram.transfer and set feePayer
       const transaction = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: senderPubkey,
           toPubkey: recipientPubkey,
-          lamports: lamportsToSend,
+          lamports,
         })
       );
 
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = senderPubkey;
 
-      // 4. Ask Phantom to sign and send the transaction
-      const { signature } = await provider.signAndSendTransaction(transaction);
+      // 7. Use sendTransaction from the wallet adapter
+      const signature = await activeAdapter.sendTransaction(transaction, connection);
 
-      // 5. Wait for Devnet confirmation
+      // 8. Confirm with blockhash and lastValidBlockHeight
       setPaymentStatus('confirming');
 
       const confirmation = await connection.confirmTransaction(
@@ -324,16 +361,18 @@ export default function App() {
       );
 
       if (confirmation.value.err) {
-        throw new Error('Transaction failed');
+        throw new Error(
+          `Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`
+        );
       }
 
-      // 6. Save receipt
+      // 9. Save receipt in localStorage
       const receipt: PaymentReceipt = {
         id: `${Date.now()}-${signature.slice(0, 6)}`,
         artisanName: selectedArtisan.name,
         artisanRole: selectedArtisan.job,
         amountNgn: selectedArtisan.priceNgn,
-        amountSol: solAmount,
+        amountSol: sol,
         signature,
         recipient: recipientPubkey.toBase58(),
         sender: senderPubkey.toBase58(),
@@ -345,19 +384,24 @@ export default function App() {
       setPaymentStatus('success');
       await fetchSolBalance(walletAddress);
     } catch (err: unknown) {
+      console.error('Payment error:', err);
       setPaymentStatus('failed');
-      const msg = err instanceof Error ? err.message.toLowerCase() : '';
-      const code = (err as { code?: number })?.code;
+
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const lower = rawMsg.toLowerCase();
+      setRealErrorText(rawMsg);
 
       if (
-        code === 4001 ||
-        msg.includes('reject') ||
-        msg.includes('cancel') ||
-        msg.includes('denied')
+        lower.includes('reject') ||
+        lower.includes('cancel') ||
+        lower.includes('denied') ||
+        lower.includes('4001')
       ) {
         setErrorMessage('You cancelled the payment.');
-      } else if (msg.includes('insufficient')) {
-        setErrorMessage('You do not have enough SOL for this payment.');
+      } else if (lower.includes('not connected')) {
+        setErrorMessage('Connect your wallet first.');
+      } else if (lower.includes('insufficient') || lower.includes('not enough')) {
+        setErrorMessage('Not enough SOL');
       } else {
         setErrorMessage('Payment failed. Please try again.');
       }
@@ -371,7 +415,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-white text-slate-900 flex flex-col">
-      {/* 1. Top Bar: small ArtiPay logo, DEVNET badge, Connect Phantom button */}
+      {/* 1. Top Bar: small ArtiPay logo, DEVNET badge, Connect Wallet button */}
       <header className="w-full max-w-md mx-auto px-5 pt-5 pb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-sm font-bold">
@@ -385,6 +429,12 @@ export default function App() {
 
         {walletAddress ? (
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-2xl px-3 py-2">
+            {walletName && (
+              <span className="text-sm font-semibold text-emerald-700">
+                {walletName}
+              </span>
+            )}
+            <span className="text-sm text-slate-400">·</span>
             <span className="text-sm font-semibold text-slate-900">
               {solBalance !== null ? `${solBalance.toFixed(3)} SOL` : '... SOL'}
             </span>
@@ -404,11 +454,11 @@ export default function App() {
         ) : (
           <button
             type="button"
-            onClick={handleConnectPhantom}
+            onClick={() => setShowWalletPopup(true)}
             disabled={isConnecting}
             className="min-h-[44px] px-4 py-2 rounded-2xl bg-slate-900 hover:bg-slate-800 active:scale-[0.98] text-white text-sm font-semibold transition-all cursor-pointer disabled:opacity-50"
           >
-            {isConnecting ? 'Connecting...' : 'Connect Phantom'}
+            {isConnecting ? 'Connecting...' : 'Connect Wallet'}
           </button>
         )}
       </header>
@@ -457,6 +507,7 @@ export default function App() {
               onClick={() => {
                 setPaymentStatus('idle');
                 setErrorMessage(null);
+                setRealErrorText(null);
               }}
               className="w-full min-h-[44px] text-sm font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
             >
@@ -478,6 +529,7 @@ export default function App() {
                     onClick={() => {
                       setSelectedArtisan(artisan);
                       setErrorMessage(null);
+                      setRealErrorText(null);
                       if (paymentStatus === 'failed') setPaymentStatus('idle');
                     }}
                     className={`w-full text-left rounded-3xl p-5 border-2 transition-all duration-150 active:scale-[0.98] cursor-pointer flex items-center justify-between gap-4 ${
@@ -515,27 +567,44 @@ export default function App() {
               })}
             </div>
 
-            {/* Friendly Error in One Short Sentence */}
+            {/* Friendly Error + Real Error Text in small gray text under it */}
             {errorMessage && (
               <div
                 role="alert"
-                className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5 flex items-center justify-between gap-3"
+                className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5 space-y-1.5"
               >
-                <div className="flex items-center gap-2.5">
-                  <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
-                  <span className="text-sm font-medium text-red-900">
-                    {errorMessage}
-                  </span>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+                    <span className="text-sm font-medium text-red-900">
+                      {errorMessage}
+                    </span>
+                  </div>
+                  {showInstallLink && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <a
+                        href="https://phantom.app/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-semibold text-red-800 underline"
+                      >
+                        Phantom
+                      </a>
+                      <a
+                        href="https://solflare.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-semibold text-red-800 underline"
+                      >
+                        Solflare
+                      </a>
+                    </div>
+                  )}
                 </div>
-                {errorMessage === 'Phantom wallet is not installed.' && (
-                  <a
-                    href="https://phantom.app/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm font-semibold text-red-800 underline shrink-0"
-                  >
-                    Get app
-                  </a>
+                {realErrorText && (
+                  <p className="text-sm text-slate-500 pl-7 break-words">
+                    {realErrorText}
+                  </p>
                 )}
               </div>
             )}
@@ -544,14 +613,14 @@ export default function App() {
             <div className="space-y-3 pt-1">
               <button
                 type="button"
-                onClick={walletAddress ? handlePay : handleConnectPhantom}
+                onClick={walletAddress ? handlePay : () => setShowWalletPopup(true)}
                 disabled={isBusy || isConnecting}
                 className="w-full min-h-[60px] py-3.5 px-6 rounded-3xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white transition-all duration-150 cursor-pointer disabled:opacity-60 flex flex-col items-center justify-center"
               >
                 {paymentStatus === 'waiting_for_approval' ? (
                   <span className="text-base font-bold flex items-center gap-2">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Approve in Phantom</span>
+                    <span>Approve in {walletName || 'Phantom'}</span>
                   </span>
                 ) : paymentStatus === 'confirming' ? (
                   <span className="text-base font-bold flex items-center gap-2">
@@ -561,7 +630,7 @@ export default function App() {
                 ) : !walletAddress ? (
                   <>
                     <span className="text-base font-bold">
-                      Connect Phantom to pay
+                      Connect Wallet to pay
                     </span>
                     <span className="text-sm text-emerald-100">
                       {selectedSol} SOL ({selectedArtisan.priceNgn.toLocaleString()} NGN)
@@ -644,6 +713,75 @@ export default function App() {
         </a>
       </footer>
 
+      {/* Connect Wallet Popup (Phantom & Solflare) */}
+      {showWalletPopup && (
+        <div
+          onClick={() => setShowWalletPopup(false)}
+          className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-5"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl bg-white p-6 space-y-4 shadow-xl"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-slate-900">
+                Select a wallet
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowWalletPopup(false)}
+                className="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5">
+              {wallets.map((adapter) => {
+                const installed = isWalletInstalled(adapter);
+                return (
+                  <button
+                    key={adapter.name}
+                    type="button"
+                    onClick={() => handleSelectWallet(adapter)}
+                    disabled={isConnecting}
+                    className="w-full min-h-[54px] px-4 py-3 rounded-2xl border-2 border-slate-200 hover:border-emerald-600 active:scale-[0.98] flex items-center justify-between transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-3">
+                      {adapter.icon && (
+                        <img
+                          src={adapter.icon}
+                          alt={adapter.name}
+                          referrerPolicy="no-referrer"
+                          className="w-7 h-7 rounded-lg"
+                        />
+                      )}
+                      <span className="text-base font-bold text-slate-900">
+                        {adapter.name}
+                      </span>
+                    </div>
+                    <span className="text-sm text-slate-500">
+                      {installed ? 'Detected' : 'Not installed'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="pt-1 text-center">
+              <a
+                href="https://phantom.app/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-slate-500 hover:text-emerald-700 underline"
+              >
+                Install Phantom or Solflare
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 6. Solana Pay QR Code Popup Modal (Hides the long solana: URL) */}
       {showQrPopup && (
         <div
@@ -656,7 +794,7 @@ export default function App() {
           >
             <div className="flex items-center justify-between">
               <span className="text-base font-bold text-slate-900">
-                Scan with Phantom
+                Scan with wallet
               </span>
               <button
                 type="button"
@@ -689,7 +827,7 @@ export default function App() {
             </div>
 
             <p className="text-sm text-slate-500">
-              Open Phantom on your phone and scan this code on Devnet.
+              Open Phantom or Solflare on your phone and scan this code on Devnet.
             </p>
           </div>
         </div>
