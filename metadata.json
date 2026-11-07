@@ -1,0 +1,6 @@
+{
+  "name": "ArtiPay - Solana Devnet Artisan Payments",
+  "description": "Pay a local artisan in Nigeria with Solana on Devnet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
