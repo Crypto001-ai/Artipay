@@ -434,7 +434,12 @@ export default function App() {
   const [askError, setAskError] = useState<string | null>(null);
   const [askRealError, setAskRealError] = useState<string | null>(null);
   const [askProposal, setAskProposal] = useState<ValidatedAskProposal | null>(null);
+  const [isCardHighlighted, setIsCardHighlighted] = useState<boolean>(false);
+  const [showFormFilledNote, setShowFormFilledNote] = useState<boolean>(false);
+  const [isFormFilledNoteFading, setIsFormFilledNoteFading] = useState<boolean>(false);
   const askInputRef = useRef<HTMLInputElement | null>(null);
+  const paymentCardRef = useRef<HTMLDivElement | null>(null);
+  const fillTimersRef = useRef<number[]>([]);
 
   // Instantiate Phantom and Solflare wallet adapters for Devnet
   const wallets = useMemo<SignerWalletAdapter[]>(
@@ -754,9 +759,22 @@ export default function App() {
     }
   };
 
+  // Clean up any pending Fill Form timers on unmount
+  useEffect(() => {
+    return () => {
+      fillTimersRef.current.forEach((id) => window.clearTimeout(id));
+    };
+  }, []);
+
   // Fill the form when user taps "Fill form" on the AI confirmation card
   const handleConfirmFillForm = () => {
     if (!askProposal) return;
+
+    // Do not auto-focus any input; blur active element so phone keyboard stays closed
+    askInputRef.current?.blur();
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
 
     if (askProposal.payToMode === 'wallet' && askProposal.address) {
       setPayToMode('wallet');
@@ -776,6 +794,49 @@ export default function App() {
     setRealErrorText(null);
     if (paymentStatus === 'failed') setPaymentStatus('idle');
     setAskProposal(null);
+
+    // Clear any previous timers
+    fillTimersRef.current.forEach((id) => window.clearTimeout(id));
+    fillTimersRef.current = [];
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Show the green confirmation note at the top of the payment card for 4 seconds
+    setShowFormFilledNote(true);
+    setIsFormFilledNoteFading(false);
+
+    if (!prefersReducedMotion) {
+      const fadeTimer = window.setTimeout(() => {
+        setIsFormFilledNoteFading(true);
+      }, 3600);
+      fillTimersRef.current.push(fadeTimer);
+    }
+
+    const hideNoteTimer = window.setTimeout(() => {
+      setShowFormFilledNote(false);
+      setIsFormFilledNoteFading(false);
+    }, 4000);
+    fillTimersRef.current.push(hideNoteTimer);
+
+    // Wait 100ms so the form has updated, then scroll to the payment card and trigger highlight
+    const scrollTimer = window.setTimeout(() => {
+      paymentCardRef.current?.scrollIntoView({
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+        block: 'center',
+      });
+
+      if (!prefersReducedMotion) {
+        setIsCardHighlighted(true);
+        const removeHighlightTimer = window.setTimeout(() => {
+          setIsCardHighlighted(false);
+        }, 1500);
+        fillTimersRef.current.push(removeHighlightTimer);
+      }
+    }, 100);
+    fillTimersRef.current.push(scrollTimer);
   };
 
   // Handle pasting from clipboard into the custom wallet input
@@ -1516,11 +1577,33 @@ export default function App() {
               )}
             </div>
 
-            {/* "Pay to" Switch at the top of the payment card: Artisan vs Any wallet */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-slate-600">Pay to</span>
-              </div>
+            {/* Payment Card Container (Target for Fill form scroll, glow pulse, and 4s note) */}
+            <div
+              ref={paymentCardRef}
+              className={`scroll-mt-20 rounded-3xl transition-all duration-500 space-y-6 ${
+                isCardHighlighted
+                  ? 'p-4 -mx-1 border-2 border-emerald-500 bg-emerald-50/25 shadow-[0_0_0_4px_rgba(16,185,129,0.18),0_8px_28px_rgba(5,46,34,0.14)] animate-pulse'
+                  : 'border-2 border-transparent'
+              }`}
+            >
+              {/* 4-second green note at the top of the payment card */}
+              {showFormFilledNote && (
+                <div
+                  role="status"
+                  className={`rounded-2xl bg-emerald-50 border border-emerald-300 px-3.5 py-2.5 flex items-center gap-2 text-sm font-semibold text-emerald-900 transition-opacity duration-300 ${
+                    isFormFilledNoteFading ? 'opacity-0' : 'opacity-100'
+                  }`}
+                >
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0 stroke-[3]" />
+                  <span>Form filled. Check the details, then tap Pay.</span>
+                </div>
+              )}
+
+              {/* "Pay to" Switch at the top of the payment card: Artisan vs Any wallet */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-600">Pay to</span>
+                </div>
               <div className="grid grid-cols-2 gap-2 p-1.5 rounded-2xl bg-slate-100">
                 <button
                   type="button"
@@ -1860,6 +1943,7 @@ export default function App() {
                   <span>Pay with QR instead</span>
                 </button>
               </div>
+            </div>
             </div>
           </section>
         )}
