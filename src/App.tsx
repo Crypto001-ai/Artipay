@@ -32,6 +32,8 @@ import {
   Copy,
   Clock,
   ChevronDown,
+  ArrowDown,
+  Share2,
 } from 'lucide-react';
 import HomePage from './HomePage.tsx';
 
@@ -335,6 +337,11 @@ export default function App() {
   const [latestReceipt, setLatestReceipt] = useState<PaymentReceipt | null>(null);
   const [copiedReceiptLink, setCopiedReceiptLink] = useState<boolean>(false);
   const [showQrPopup, setShowQrPopup] = useState<boolean>(false);
+  const [showReceivePopup, setShowReceivePopup] = useState<boolean>(false);
+  const [copiedWalletAddress, setCopiedWalletAddress] = useState<boolean>(false);
+
+  const canNativeShare =
+    typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
   // Load saved receipts from localStorage
   const [paymentHistory, setPaymentHistory] = useState<PaymentReceipt[]>(() => {
@@ -612,6 +619,27 @@ export default function App() {
     setTimeout(() => setCopiedReceiptLink(false), 2000);
   };
 
+  // Handle copying connected wallet address inside Receive popup
+  const handleCopyWalletAddress = () => {
+    if (!walletAddress) return;
+    navigator.clipboard.writeText(walletAddress);
+    setCopiedWalletAddress(true);
+    setTimeout(() => setCopiedWalletAddress(false), 2000);
+  };
+
+  // Handle sharing connected wallet address using native share sheet if available
+  const handleShareWalletAddress = async () => {
+    if (!walletAddress || typeof navigator.share !== 'function') return;
+    try {
+      await navigator.share({
+        title: 'Receive SOL on ArtiPay (Devnet)',
+        text: walletAddress,
+      });
+    } catch {
+      // Ignore if user closes the share sheet
+    }
+  };
+
   // Handle typing in the SOL field -> update NGN field instantly
   const handleSolInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -771,6 +799,7 @@ export default function App() {
     setWalletName(null);
     setWalletAddress(null);
     setSolBalance(null);
+    setShowReceivePopup(false);
     setNotOnDevnetWarning(false);
     setErrorMessage(null);
     setRealErrorText(null);
@@ -989,52 +1018,68 @@ export default function App() {
           </span>
         </div>
 
-        {/* Compact Wallet Pill with Dropdown Menu */}
+        {/* Receive Button + Compact Wallet Pill with Dropdown Menu */}
         {walletAddress ? (
-          <div ref={walletMenuRef} className="relative shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={() => setShowWalletMenu((prev) => !prev)}
-              className="min-h-[40px] px-2.5 py-1.5 rounded-2xl bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center gap-1.5 text-sm font-semibold text-slate-900 cursor-pointer transition-colors"
+              onClick={() => {
+                setShowWalletMenu(false);
+                setShowReceivePopup(true);
+              }}
+              aria-label="Receive SOL"
+              title="Receive SOL"
+              className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center gap-1.5 text-sm font-semibold cursor-pointer transition-colors shrink-0"
             >
-              {activeAdapter?.icon ? (
-                <img
-                  src={activeAdapter.icon}
-                  alt={walletName || 'Wallet'}
-                  referrerPolicy="no-referrer"
-                  className="w-4 h-4 rounded-sm shrink-0"
-                />
-              ) : (
-                <Wallet className="w-4 h-4 text-emerald-600 shrink-0" />
-              )}
-              <span className="text-slate-600">
-                {shortenAddress(walletAddress, 3)}
-              </span>
-              <span className="text-slate-300">·</span>
-              <span className="font-bold text-slate-900">
-                {solBalance !== null ? `${solBalance.toFixed(2)} SOL` : '...'}
-              </span>
-              <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <ArrowDown className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span className="hidden min-[420px]:inline">Receive</span>
             </button>
 
-            {showWalletMenu && (
-              <div className="absolute right-0 mt-2 w-48 rounded-2xl bg-white border border-slate-200 shadow-lg p-2 z-40 space-y-1">
-                <div className="px-3 py-1.5 text-sm text-slate-500 border-b border-slate-100">
-                  <div className="font-semibold text-slate-900">
-                    {walletName || 'Connected Wallet'}
+            <div ref={walletMenuRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowWalletMenu((prev) => !prev)}
+                className="min-h-[40px] px-2.5 py-1.5 rounded-2xl bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center gap-1.5 text-sm font-semibold text-slate-900 cursor-pointer transition-colors"
+              >
+                {activeAdapter?.icon ? (
+                  <img
+                    src={activeAdapter.icon}
+                    alt={walletName || 'Wallet'}
+                    referrerPolicy="no-referrer"
+                    className="w-4 h-4 rounded-sm shrink-0"
+                  />
+                ) : (
+                  <Wallet className="w-4 h-4 text-emerald-600 shrink-0" />
+                )}
+                <span className="text-slate-600">
+                  {shortenAddress(walletAddress, 3)}
+                </span>
+                <span className="text-slate-300">·</span>
+                <span className="font-bold text-slate-900">
+                  {solBalance !== null ? `${solBalance.toFixed(2)} SOL` : '...'}
+                </span>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              </button>
+
+              {showWalletMenu && (
+                <div className="absolute right-0 mt-2 w-48 rounded-2xl bg-white border border-slate-200 shadow-lg p-2 z-40 space-y-1">
+                  <div className="px-3 py-1.5 text-sm text-slate-500 border-b border-slate-100">
+                    <div className="font-semibold text-slate-900">
+                      {walletName || 'Connected Wallet'}
+                    </div>
+                    <div className="truncate">{shortenAddress(walletAddress, 6)}</div>
                   </div>
-                  <div className="truncate">{shortenAddress(walletAddress, 6)}</div>
+                  <button
+                    type="button"
+                    onClick={handleDisconnect}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl text-left text-sm font-semibold text-red-600 hover:bg-red-50 flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>Disconnect</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleDisconnect}
-                  className="w-full min-h-[40px] px-3 py-2 rounded-xl text-left text-sm font-semibold text-red-600 hover:bg-red-50 flex items-center gap-2 cursor-pointer transition-colors"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span>Disconnect</span>
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         ) : (
           <button
@@ -1831,6 +1876,107 @@ export default function App() {
             <p className="text-sm text-slate-500">
               Open Phantom or Solflare on your phone and scan this code on Devnet.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Receive SOL Bottom Sheet on Mobile / Centered Popup on Desktop */}
+      {showReceivePopup && walletAddress && (
+        <div
+          onClick={() => setShowReceivePopup(false)}
+          className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-5"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl bg-white p-6 space-y-5 text-center shadow-[0_8px_30px_rgba(5,46,34,0.16)] border-t sm:border border-slate-100"
+          >
+            {/* 1. Title: "Receive SOL" + Close X button */}
+            <div className="flex items-center justify-between">
+              <span className="text-lg font-bold text-slate-900">
+                Receive SOL
+              </span>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setShowReceivePopup(false)}
+                className="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 cursor-pointer transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* 2. QR code of the connected wallet address (plain address only, no amount) */}
+            <div className="p-5 rounded-3xl bg-slate-50 border border-slate-100 inline-block mx-auto">
+              <QRCodeSVG
+                value={walletAddress}
+                size={196}
+                level="M"
+                includeMargin={false}
+                fgColor="#064E3B"
+                bgColor="#F8FAFC"
+              />
+            </div>
+
+            {/* 3. Full address in small mono text, wrapped on 2 lines */}
+            <div className="rounded-2xl bg-slate-50 border border-slate-200/80 px-4 py-3">
+              <p className="font-mono text-xs text-slate-700 leading-5 break-all max-w-[220px] mx-auto select-all">
+                {walletAddress}
+              </p>
+            </div>
+
+            {/* 4. Two buttons: "Copy address" (changes to "Copied" for 2 seconds) and "Share" (if available) */}
+            <div
+              className={`grid gap-2.5 ${
+                canNativeShare ? 'grid-cols-2' : 'grid-cols-1'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={handleCopyWalletAddress}
+                className="min-h-[48px] px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
+              >
+                {copiedWalletAddress ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4" />
+                    <span>Copy address</span>
+                  </>
+                )}
+              </button>
+
+              {canNativeShare && (
+                <button
+                  type="button"
+                  onClick={handleShareWalletAddress}
+                  className="min-h-[48px] px-4 py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 active:scale-[0.98] text-slate-900 text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
+                >
+                  <Share2 className="w-4 h-4" />
+                  <span>Share</span>
+                </button>
+              )}
+            </div>
+
+            {/* 5. Small line & 6. Link to faucet */}
+            <div className="space-y-2 pt-1">
+              <p className="text-xs text-slate-500">
+                Devnet only. This address works for test SOL.
+              </p>
+              <div>
+                <a
+                  href="https://faucet.solana.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 underline"
+                >
+                  <span>Need test SOL? Open faucet</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       )}
