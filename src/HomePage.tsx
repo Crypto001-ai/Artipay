@@ -675,7 +675,7 @@ export default function HomePage({ onOpenApp }: HomePageProps) {
                 FAQ
               </button>
               <a
-                href="https://github.com/TechAbdullahi"
+                href="https://github.com/Crypto001-ai/Artipay"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="min-h-[44px] px-3 inline-flex items-center justify-center hover:text-white transition-colors"

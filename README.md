@@ -4,7 +4,7 @@ Pay local artisans with Solana. Fast. Cheap. Proof on the blockchain.
 
 Built for the MLH Solana Hackathon (November 2026).
 
-**Live app:** https://artipay-rho.vercel.app/
+**Live app:** [your Vercel link]
 **Demo video:** [your video link]
 
 ---
@@ -106,4 +106,4 @@ Never commit your .env file or share your seed phrase.
 
 TechAbdullahi
 X: https://x.com/TechAbdullahi
-GitHub: https://github.com/Crypto001-ai
+GitHub: https://github.com/Crypto001-ai/Artipay
