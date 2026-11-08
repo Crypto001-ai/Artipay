@@ -77,8 +77,7 @@ AI output is checked in the app before use: the address must be valid, the amoun
 ## Run it yourself
 
 1. Clone the repo:
-   git clone [your repo link]
-   cd [repo folder]
+   git clone https://github.com/Crypto001-ai/Artipay.git then cd Artipay
 2. Install packages:
    npm install
 3. For Ask ArtiPay, create a file named .env.local and add your key:
