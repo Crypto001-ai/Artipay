@@ -4,14 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
+    "dev": "tsx server.ts",
     "build": "vite build",
+    "start": "node server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
+    "@google/genai": "^3.0.0",
     "@solana/wallet-adapter-base": "^0.9.28",
     "@solana/wallet-adapter-wallets": "^0.19.40",
     "@solana/web3.js": "^1.98.0",

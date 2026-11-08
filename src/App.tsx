@@ -55,6 +55,13 @@ const FEE_RESERVE_LAMPORTS = 10_000;
 // Quick preset SOL buttons
 const QUICK_SOL_AMOUNTS = [0.01, 0.02, 0.05];
 
+// 3 Example chips for Ask ArtiPay
+const ASK_EXAMPLES = [
+  'Pay Aisha 4,000 naira',
+  'Pay Musa 0.03 SOL',
+  'Send 0.05 SOL to ',
+];
+
 // Key used to save payment receipts in localStorage
 const RECEIPTS_STORAGE_KEY = 'artipay_devnet_receipts_v1';
 
@@ -87,6 +94,26 @@ export interface PaymentReceipt {
   sender: string;
   note?: string;
   timestamp: string;
+}
+
+interface AskAiRawResponse {
+  type: 'artisan' | 'wallet' | null;
+  artisanName: string | null;
+  address: string | null;
+  amountSol: number | null;
+  amountNgn: number | null;
+  note: string | null;
+  error: string | null;
+}
+
+interface ValidatedAskProposal {
+  payToMode: PayToMode;
+  artisan?: Artisan;
+  address?: string;
+  recipientLabel: string;
+  amountSol: number;
+  amountNgn: number;
+  note: string | null;
 }
 
 type PaymentStatus =
@@ -260,6 +287,13 @@ export default function App() {
     formatNgnNumber(ARTISANS[0].priceNgn)
   );
 
+  // "Ask ArtiPay" AI assistant state
+  const [askText, setAskText] = useState<string>('');
+  const [isAsking, setIsAsking] = useState<boolean>(false);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [askProposal, setAskProposal] = useState<ValidatedAskProposal | null>(null);
+  const askInputRef = useRef<HTMLInputElement | null>(null);
+
   // Instantiate Phantom and Solflare wallet adapters for Devnet
   const wallets = useMemo<SignerWalletAdapter[]>(
     () => [
@@ -329,7 +363,7 @@ export default function App() {
       const devnetSol = lamports / LAMPORTS_PER_SOL;
       setSolBalance(devnetSol);
 
-      // Check if wallet provider reports a non-devnet network or has 0 SOL on devnet
+      // Check if wallet provider reports a non-devnet network
       const win = window as unknown as {
         solana?: { networkVersion?: string; cluster?: string };
         solflare?: { network?: string; cluster?: string };
@@ -410,6 +444,151 @@ export default function App() {
     solBalance !== null &&
     numericSol > 0 &&
     numericSol + FEE_RESERVE_SOL > solBalance;
+
+  // ==========================================================================
+  // ASK ARTIPAY AI HANDLERS & BROWSER VALIDATION
+  // ==========================================================================
+
+  const handleAskSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = askText.trim();
+    setAskError(null);
+    setAskProposal(null);
+
+    if (!trimmed) {
+      setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
+      return;
+    }
+
+    setIsAsking(true);
+    try {
+      const response = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: trimmed }),
+      });
+
+      const rawBody = await response.text();
+      let data: AskAiRawResponse;
+      try {
+        data = JSON.parse(rawBody) as AskAiRawResponse;
+      } catch {
+        setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
+        return;
+      }
+
+      if (data.error) {
+        setAskError(data.error);
+        return;
+      }
+
+      // Browser-side validation:
+      // 1. Validate amount (must be > 0 and at most 1 SOL)
+      const solFromAi =
+        typeof data.amountSol === 'number' && Number.isFinite(data.amountSol)
+          ? Number(data.amountSol.toFixed(4))
+          : typeof data.amountNgn === 'number' && Number.isFinite(data.amountNgn)
+            ? Number((data.amountNgn / NGN_PER_SOL).toFixed(4))
+            : NaN;
+
+      if (!Number.isFinite(solFromAi) || solFromAi <= 0) {
+        setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
+        return;
+      }
+
+      if (solFromAi > 1) {
+        setAskError('Amount can be at most 1 SOL.');
+        return;
+      }
+
+      const ngnComputed = Math.round(solFromAi * NGN_PER_SOL);
+      const cleanNote =
+        typeof data.note === 'string' && data.note.trim()
+          ? data.note.trim().slice(0, 40)
+          : null;
+
+      // 2. Validate recipient (address preferred if both or type === 'wallet')
+      if (data.type === 'wallet' || (data.address && data.address.trim())) {
+        const candidateAddr = (data.address || '').trim();
+        let validPubKey: PublicKey;
+        try {
+          validPubKey = new PublicKey(candidateAddr);
+        } catch {
+          setAskError('Invalid Solana wallet address.');
+          return;
+        }
+
+        const base58Addr = validPubKey.toBase58();
+        if (walletAddress && base58Addr === walletAddress) {
+          setAskError('You cannot pay yourself');
+          return;
+        }
+
+        setAskProposal({
+          payToMode: 'wallet',
+          address: base58Addr,
+          recipientLabel: shortenAddress(base58Addr, 4),
+          amountSol: solFromAi,
+          amountNgn: ngnComputed,
+          note: cleanNote,
+        });
+        return;
+      }
+
+      if (data.type === 'artisan' && data.artisanName) {
+        const matched = ARTISANS.find(
+          (a) =>
+            a.name.toLowerCase() === data.artisanName!.trim().toLowerCase() ||
+            a.job.toLowerCase() === data.artisanName!.trim().toLowerCase()
+        );
+
+        if (!matched) {
+          setAskError('That artisan is not in our list. Try Emeka, Aisha, or Musa.');
+          return;
+        }
+
+        setAskProposal({
+          payToMode: 'artisan',
+          artisan: matched,
+          recipientLabel: matched.name,
+          amountSol: solFromAi,
+          amountNgn: ngnComputed,
+          note: cleanNote,
+        });
+        return;
+      }
+
+      setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
+    } catch {
+      setAskError('Could not reach Ask ArtiPay. Please try again.');
+    } finally {
+      setIsAsking(false);
+    }
+  };
+
+  // Fill the form when user taps "Fill form" on the AI confirmation card
+  const handleConfirmFillForm = () => {
+    if (!askProposal) return;
+
+    if (askProposal.payToMode === 'wallet' && askProposal.address) {
+      setPayToMode('wallet');
+      setCustomWalletInput(askProposal.address);
+    } else if (askProposal.payToMode === 'artisan' && askProposal.artisan) {
+      setPayToMode('artisan');
+      setSelectedArtisan(askProposal.artisan);
+    }
+
+    setSolInput(askProposal.amountSol.toString());
+    setNgnInput(formatNgnNumber(askProposal.amountNgn));
+    if (askProposal.note) {
+      setNoteInput(askProposal.note);
+    }
+
+    setErrorMessage(null);
+    setRealErrorText(null);
+    if (paymentStatus === 'failed') setPaymentStatus('idle');
+    setAskProposal(null);
+  };
 
   // Handle pasting from clipboard into the custom wallet input
   const handlePasteWallet = async () => {
@@ -923,7 +1102,7 @@ export default function App() {
           )}
         </section>
 
-        {/* 5. Success Screen OR Payment Card */}
+        {/* 5. Success Screen OR Ask ArtiPay + Payment Card */}
         {paymentStatus === 'success' && latestReceipt ? (
           <section className="rounded-3xl bg-emerald-50/70 border-2 border-emerald-500 p-6 text-center space-y-5 transition-all">
             <div className="w-16 h-16 rounded-full bg-emerald-600 text-white flex items-center justify-center mx-auto shadow-sm scale-100 transition-transform">
@@ -989,6 +1168,119 @@ export default function App() {
           </section>
         ) : (
           <section className="space-y-6">
+            {/* ==============================================================
+                ASK ARTIPAY BOX (ABOVE PAYMENT CARD)
+               ============================================================== */}
+            <div className="rounded-3xl border-2 border-slate-200 bg-slate-50/70 p-4 space-y-3">
+              <div className="flex items-center gap-2.5">
+                <div
+                  aria-hidden="true"
+                  className="w-7 h-7 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="w-4 h-4"
+                  >
+                    <line x1="12" y1="3" x2="12" y2="6" />
+                    <circle cx="12" cy="2.5" r="1" fill="currentColor" stroke="none" />
+                    <rect x="4" y="6" width="16" height="13" rx="4" />
+                    <circle cx="9.5" cy="12" r="1.25" fill="currentColor" stroke="none" />
+                    <circle cx="14.5" cy="12" r="1.25" fill="currentColor" stroke="none" />
+                    <line x1="9.5" y1="15.5" x2="14.5" y2="15.5" />
+                  </svg>
+                </div>
+                <span className="text-sm font-bold text-slate-900">
+                  Ask ArtiPay
+                </span>
+              </div>
+
+              <form onSubmit={handleAskSubmit} className="flex items-center gap-2">
+                <input
+                  ref={askInputRef}
+                  type="text"
+                  value={askText}
+                  onChange={(e) => {
+                    setAskText(e.target.value);
+                    if (askError) setAskError(null);
+                  }}
+                  placeholder='Try "Pay Emeka 5,000 naira"'
+                  className="flex-1 min-w-0 min-h-[44px] px-3.5 py-2 rounded-2xl bg-white border border-slate-200 focus:border-emerald-600 focus:outline-none text-sm text-slate-900"
+                />
+                <button
+                  type="submit"
+                  disabled={isAsking}
+                  className="min-h-[44px] px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white text-sm font-bold transition-all cursor-pointer disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+                >
+                  {isAsking ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Thinking...</span>
+                    </>
+                  ) : (
+                    <span>Ask</span>
+                  )}
+                </button>
+              </form>
+
+              {/* 3 Example Chips that only put text in the box when tapped */}
+              <div className="flex flex-wrap gap-1.5">
+                {ASK_EXAMPLES.map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      setAskText(chip);
+                      setAskError(null);
+                      setAskProposal(null);
+                      askInputRef.current?.focus();
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 text-sm text-slate-700 transition-colors cursor-pointer"
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+
+              {/* Ask Error Message */}
+              {askError && (
+                <div className="rounded-2xl bg-red-50 border border-red-200 px-3.5 py-2.5 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span className="text-sm text-red-900">{askError}</span>
+                </div>
+              )}
+
+              {/* Confirmation Card after AI answers */}
+              {askProposal && (
+                <div className="rounded-2xl bg-emerald-50 border border-emerald-300 p-4 space-y-3">
+                  <p className="text-base font-bold text-slate-900">
+                    Pay {askProposal.recipientLabel} {askProposal.amountSol} SOL (about{' '}
+                    {askProposal.amountNgn.toLocaleString('en-US')} NGN)?
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleConfirmFillForm}
+                      className="min-h-[42px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold transition-colors cursor-pointer"
+                    >
+                      Fill form
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAskProposal(null)}
+                      className="min-h-[42px] rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-sm font-bold transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* "Pay to" Switch at the top of the payment card: Artisan vs Any wallet */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
