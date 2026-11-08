@@ -236,6 +236,145 @@ function getErrorText(err: unknown): string {
   return String(err);
 }
 
+// Local backup parser that runs in the browser before calling /api/ask
+function parseAskLocally(
+  rawText: string,
+  connectedWalletAddress: string | null
+):
+  | { handled: true; proposal?: ValidatedAskProposal; error?: string }
+  | { handled: false } {
+  let workingText = rawText.trim();
+  if (!workingText) return { handled: false };
+
+  // 1. Find a Solana address (32 to 44 base58 characters) anywhere in the text
+  let matchedAddress: string | null = null;
+  let invalidCandidateAddress = false;
+  const base58Candidates = workingText.match(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g) || [];
+
+  for (const token of base58Candidates) {
+    try {
+      const pubKey = new PublicKey(token);
+      matchedAddress = pubKey.toBase58();
+      workingText = workingText.replace(token, ' ');
+      break;
+    } catch {
+      invalidCandidateAddress = true;
+    }
+  }
+
+  // 2. Match an artisan name (Emeka, Aisha, Musa) or job (electrician, tailor, mechanic)
+  let matchedArtisan: Artisan | null = null;
+  for (const artisan of ARTISANS) {
+    const nameRegex = new RegExp(`\\b${artisan.name}\\b`, 'i');
+    const jobRegex = new RegExp(`\\b${artisan.job}\\b`, 'i');
+    if (nameRegex.test(workingText) || jobRegex.test(workingText)) {
+      matchedArtisan = artisan;
+      break;
+    }
+  }
+
+  // 3. Find an amount and currency: SOL, or naira (naira, NGN, N, ₦, and "k" meaning thousand)
+  const amountRegex =
+    /(?:(₦|ngn|n)\s*)?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?|\.\d+)\s*(k)?\s*(sol(?:ana)?|naira|ngn|n|₦)?(?=\b|\s|$)/gi;
+
+  let parsedAmountSol: number | null = null;
+  let parsedAmountNgn: number | null = null;
+  let match: RegExpExecArray | null;
+
+  while ((match = amountRegex.exec(workingText)) !== null) {
+    const prefixCurrency = match[1]?.toLowerCase() || '';
+    const rawNum = match[2].replace(/,/g, '');
+    const hasK = Boolean(match[3]);
+    const suffixCurrency = match[4]?.toLowerCase() || '';
+
+    let value = parseFloat(rawNum);
+    if (!Number.isFinite(value) || value <= 0) continue;
+
+    if (hasK) {
+      value *= 1000;
+    }
+
+    let currency: 'SOL' | 'NGN';
+    if (suffixCurrency.startsWith('sol')) {
+      currency = 'SOL';
+    } else if (
+      prefixCurrency === '₦' ||
+      prefixCurrency === 'ngn' ||
+      prefixCurrency === 'n' ||
+      suffixCurrency === 'naira' ||
+      suffixCurrency === 'ngn' ||
+      suffixCurrency === 'n' ||
+      suffixCurrency === '₦'
+    ) {
+      currency = 'NGN';
+    } else {
+      // No currency written: treat numbers of 1,000 or more as Naira, and smaller numbers as SOL
+      currency = value >= 1000 ? 'NGN' : 'SOL';
+    }
+
+    if (currency === 'NGN') {
+      parsedAmountNgn = Math.round(value);
+      parsedAmountSol = Number((value / NGN_PER_SOL).toFixed(4));
+    } else {
+      parsedAmountSol = Number(value.toFixed(4));
+      parsedAmountNgn = Math.round(parsedAmountSol * NGN_PER_SOL);
+    }
+    break;
+  }
+
+  // If the user pasted a 32-44 char address token that failed new PublicKey() alongside an amount
+  if (!matchedAddress && !matchedArtisan && invalidCandidateAddress && parsedAmountSol !== null) {
+    return { handled: true, error: 'Invalid Solana wallet address.' };
+  }
+
+  // Only handle locally if we found both a target (address or artisan) and a valid amount
+  if ((!matchedAddress && !matchedArtisan) || parsedAmountSol === null || parsedAmountNgn === null) {
+    return { handled: false };
+  }
+
+  // 4. Validate amount (> 0 and at most 1 SOL)
+  if (parsedAmountSol <= 0) {
+    return { handled: true, error: 'Amount must be above 0 SOL.' };
+  }
+  if (parsedAmountSol > 1) {
+    return { handled: true, error: 'Amount can be at most 1 SOL.' };
+  }
+
+  // Prefer wallet address if present
+  if (matchedAddress) {
+    if (connectedWalletAddress && matchedAddress === connectedWalletAddress) {
+      return { handled: true, error: 'You cannot pay yourself' };
+    }
+    return {
+      handled: true,
+      proposal: {
+        payToMode: 'wallet',
+        address: matchedAddress,
+        recipientLabel: shortenAddress(matchedAddress, 4),
+        amountSol: parsedAmountSol,
+        amountNgn: parsedAmountNgn,
+        note: null,
+      },
+    };
+  }
+
+  if (matchedArtisan) {
+    return {
+      handled: true,
+      proposal: {
+        payToMode: 'artisan',
+        artisan: matchedArtisan,
+        recipientLabel: matchedArtisan.name,
+        amountSol: parsedAmountSol,
+        amountNgn: parsedAmountNgn,
+        note: null,
+      },
+    };
+  }
+
+  return { handled: false };
+}
+
 export default function App() {
   // Simple hash routing: '#/' for Home page, '#/app' for Dashboard
   const [route, setRoute] = useState<'home' | 'app'>(() =>
@@ -293,6 +432,7 @@ export default function App() {
   const [askText, setAskText] = useState<string>('');
   const [isAsking, setIsAsking] = useState<boolean>(false);
   const [askError, setAskError] = useState<string | null>(null);
+  const [askRealError, setAskRealError] = useState<string | null>(null);
   const [askProposal, setAskProposal] = useState<ValidatedAskProposal | null>(null);
   const askInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -460,6 +600,7 @@ export default function App() {
     if (e) e.preventDefault();
     const trimmed = askText.trim();
     setAskError(null);
+    setAskRealError(null);
     setAskProposal(null);
 
     if (!trimmed) {
@@ -467,20 +608,46 @@ export default function App() {
       return;
     }
 
+    // 1. Try local backup parser first before calling the AI
+    const localResult = parseAskLocally(trimmed, walletAddress);
+    if (localResult.handled) {
+      if (localResult.error) {
+        setAskError(localResult.error);
+      } else if (localResult.proposal) {
+        setAskProposal(localResult.proposal);
+      }
+      return;
+    }
+
+    // 2. Only call /api/ask when the local parser cannot understand the text
     setIsAsking(true);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+
     try {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: trimmed }),
+        signal: controller.signal,
       });
 
       const rawBody = await response.text();
       let data: AskAiRawResponse;
       try {
         data = JSON.parse(rawBody) as AskAiRawResponse;
-      } catch {
-        setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
+      } catch (parseErr: unknown) {
+        setAskError('Could not read response from Ask ArtiPay.');
+        setAskRealError(
+          `HTTP ${response.status}: ${rawBody.slice(0, 140) || getErrorText(parseErr)}`
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        const errText = data?.error || `HTTP ${response.status} ${response.statusText}`;
+        setAskError('Ask ArtiPay could not complete the request.');
+        setAskRealError(errText);
         return;
       }
 
@@ -520,8 +687,9 @@ export default function App() {
         let validPubKey: PublicKey;
         try {
           validPubKey = new PublicKey(candidateAddr);
-        } catch {
+        } catch (pubErr: unknown) {
           setAskError('Invalid Solana wallet address.');
+          setAskRealError(getErrorText(pubErr));
           return;
         }
 
@@ -566,9 +734,22 @@ export default function App() {
       }
 
       setAskError('I did not understand. Try: Pay Emeka 5,000 naira');
-    } catch {
-      setAskError('Could not reach Ask ArtiPay. Please try again.');
+    } catch (err: unknown) {
+      const rawMsg = getErrorText(err);
+      const isTimeout =
+        controller.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError') ||
+        rawMsg.toLowerCase().includes('abort');
+
+      if (isTimeout) {
+        setAskError('Request timed out after 15 seconds. Please try again.');
+        setAskRealError(rawMsg);
+      } else {
+        setAskError('Could not reach Ask ArtiPay. Please try again.');
+        setAskRealError(rawMsg);
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setIsAsking(false);
     }
   };
@@ -1252,6 +1433,7 @@ export default function App() {
                   onChange={(e) => {
                     setAskText(e.target.value);
                     if (askError) setAskError(null);
+                    if (askRealError) setAskRealError(null);
                   }}
                   placeholder='Try "Pay Emeka 5,000 naira"'
                   className="flex-1 min-w-0 min-h-[44px] px-3.5 py-2 rounded-2xl bg-white border border-slate-200 focus:border-emerald-600 focus:outline-none text-sm text-slate-900"
@@ -1281,6 +1463,7 @@ export default function App() {
                     onClick={() => {
                       setAskText(chip);
                       setAskError(null);
+                      setAskRealError(null);
                       setAskProposal(null);
                       askInputRef.current?.focus();
                     }}
@@ -1291,11 +1474,18 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Ask Error Message */}
+              {/* Ask Error Message + Real Error Text in small gray text */}
               {askError && (
-                <div className="rounded-2xl bg-red-50 border border-red-200 px-3.5 py-2.5 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-                  <span className="text-sm text-red-900">{askError}</span>
+                <div className="rounded-2xl bg-red-50 border border-red-200 px-3.5 py-2.5 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                    <span className="text-sm font-medium text-red-900">{askError}</span>
+                  </div>
+                  {askRealError && (
+                    <p className="text-xs text-slate-500 pl-6 break-words">
+                      {askRealError}
+                    </p>
+                  )}
                 </div>
               )}
 
