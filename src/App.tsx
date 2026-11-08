@@ -94,6 +94,7 @@ export interface PaymentReceipt {
   signature: string;
   recipient: string;
   sender: string;
+  payer?: string;
   note?: string;
   timestamp: string;
 }
@@ -498,14 +499,22 @@ export default function App() {
     }
   });
 
-  // Summary metrics: total paid SOL and number of payments
+  // Filter receipts strictly by connected wallet's payer address (old receipts without payer are hidden, never deleted)
+  const walletPayments = useMemo(() => {
+    if (!walletAddress) return [];
+    return paymentHistory.filter(
+      (item) => Boolean(item.payer) && item.payer === walletAddress
+    );
+  }, [paymentHistory, walletAddress]);
+
+  // Summary metrics for the connected wallet: total paid SOL and number of payments
   const totalPaidSol = useMemo(() => {
-    const sum = paymentHistory.reduce(
+    const sum = walletPayments.reduce(
       (acc, item) => acc + (Number(item.amountSol) || 0),
       0
     );
     return Number(sum.toFixed(4));
-  }, [paymentHistory]);
+  }, [walletPayments]);
 
   // Fetch the user's SOL balance from Solana Devnet and check if wallet might be on Mainnet
   const fetchSolBalance = useCallback(async (address: string) => {
@@ -1027,7 +1036,32 @@ export default function App() {
     }
   };
 
-  // Disconnect active wallet adapter
+  // Listen for wallet account switches or disconnects so stats and history update immediately
+  useEffect(() => {
+    if (!activeAdapter) return;
+
+    const handlePubkeyUpdate = (newPubKey: PublicKey | null) => {
+      if (newPubKey) {
+        const nextAddress = newPubKey.toBase58();
+        setWalletAddress(nextAddress);
+        fetchSolBalance(nextAddress);
+      }
+    };
+
+    const win = window as unknown as {
+      solana?: {
+        on?: (event: string, cb: (pubKey: PublicKey | null) => void) => void;
+        removeListener?: (event: string, cb: (pubKey: PublicKey | null) => void) => void;
+      };
+    };
+
+    win.solana?.on?.('accountChanged', handlePubkeyUpdate);
+    return () => {
+      win.solana?.removeListener?.('accountChanged', handlePubkeyUpdate);
+    };
+  }, [activeAdapter, fetchSolBalance]);
+
+  // Disconnect active wallet adapter and clear session state
   const handleDisconnect = async () => {
     setShowWalletMenu(false);
     if (activeAdapter) {
@@ -1037,15 +1071,37 @@ export default function App() {
         // Ignore disconnect errors
       }
     }
+    fillTimersRef.current.forEach((id) => window.clearTimeout(id));
+    fillTimersRef.current = [];
+
     setActiveAdapter(null);
     setWalletName(null);
     setWalletAddress(null);
     setSolBalance(null);
     setShowReceivePopup(false);
+    setShowQrPopup(false);
     setNotOnDevnetWarning(false);
     setErrorMessage(null);
     setRealErrorText(null);
     setShowInstallLink(false);
+
+    // Clear any success screen and any filled form values from the session
+    setPaymentStatus('idle');
+    setLatestReceipt(null);
+    setCopiedReceiptLink(false);
+    setPayToMode('artisan');
+    setSelectedArtisan(ARTISANS[0]);
+    setCustomWalletInput('');
+    setSolInput(ngnToSol(ARTISANS[0].priceNgn).toString());
+    setNgnInput(formatNgnNumber(ARTISANS[0].priceNgn));
+    setNoteInput('');
+    setAskText('');
+    setAskProposal(null);
+    setAskError(null);
+    setAskRealError(null);
+    setShowFormFilledNote(false);
+    setIsFormFilledNoteFading(false);
+    setIsCardHighlighted(false);
   };
 
   // Build, sign, send, and confirm a Solana Devnet transfer
@@ -1143,9 +1199,10 @@ export default function App() {
         );
       }
 
-      // 8. Save receipt in localStorage with who was paid and optional note
+      // 8. Save receipt in localStorage with payer wallet address, who was paid, and optional note
       const cleanNote = noteInput.trim().slice(0, 40);
       const recipientBase58 = recipientPubkey.toBase58();
+      const payerBase58 = senderPubkey.toBase58();
       const receipt: PaymentReceipt = {
         id: `${Date.now()}-${signature.slice(0, 6)}`,
         payToMode,
@@ -1158,7 +1215,8 @@ export default function App() {
         amountSol: sol,
         signature,
         recipient: recipientBase58,
-        sender: senderPubkey.toBase58(),
+        sender: payerBase58,
+        payer: payerBase58,
         note: cleanNote || undefined,
         timestamp: new Date().toISOString(),
       };
@@ -1348,27 +1406,43 @@ export default function App() {
             </p>
           </div>
 
-          {/* Small Summary Row: Wallet balance, Total paid, Number of payments */}
-          <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-50 border border-slate-200/80 p-3 text-center">
-            <div>
-              <div className="text-sm text-slate-500">Balance</div>
-              <div className="text-base font-bold text-slate-900">
-                {solBalance !== null ? `${solBalance.toFixed(2)} SOL` : '0.00 SOL'}
+          {/* Summary Row (only when a wallet is connected) OR Connect Wallet Card */}
+          {walletAddress ? (
+            <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-50 border border-slate-200/80 p-3 text-center">
+              <div>
+                <div className="text-sm text-slate-500">Balance</div>
+                <div className="text-base font-bold text-slate-900">
+                  {solBalance !== null ? `${solBalance.toFixed(2)} SOL` : '0.00 SOL'}
+                </div>
+              </div>
+              <div className="border-x border-slate-200/80 px-1">
+                <div className="text-sm text-slate-500">Total paid</div>
+                <div className="text-base font-bold text-slate-900">
+                  {totalPaidSol} SOL
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-slate-500">Payments</div>
+                <div className="text-base font-bold text-slate-900">
+                  {walletPayments.length}
+                </div>
               </div>
             </div>
-            <div className="border-x border-slate-200/80 px-1">
-              <div className="text-sm text-slate-500">Total paid</div>
-              <div className="text-base font-bold text-slate-900">
-                {totalPaidSol} SOL
-              </div>
+          ) : (
+            <div className="rounded-3xl bg-slate-50 border border-slate-200/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <p className="text-sm text-slate-600">
+                Connect your wallet to see your balance and payments.
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowWalletPopup(true)}
+                disabled={isConnecting}
+                className="min-h-[40px] px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white text-sm font-bold transition-all cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                {isConnecting ? 'Connecting...' : 'Connect Wallet'}
+              </button>
             </div>
-            <div>
-              <div className="text-sm text-slate-500">Payments</div>
-              <div className="text-base font-bold text-slate-900">
-                {paymentHistory.length}
-              </div>
-            </div>
-          </div>
+          )}
 
           {/* Clear warning if wallet is not on Devnet or has 0 Devnet SOL */}
           {(notOnDevnetWarning || (walletAddress && solBalance === 0)) && (
@@ -1914,7 +1988,7 @@ export default function App() {
                 ) : !walletAddress ? (
                   <>
                     <span className="text-base font-bold">
-                      Connect Wallet to pay
+                      Connect wallet to pay
                     </span>
                     <span className="text-sm text-emerald-100">
                       {numericSol} SOL ({numericNgn.toLocaleString('en-US')} NGN)
@@ -1948,67 +2022,66 @@ export default function App() {
           </section>
         )}
 
-        {/* 7. Recent Payments List at the Bottom (with Empty State & Relative Time) */}
-        <section className="pt-4 border-t border-slate-100 space-y-3">
-          <h2 className="text-base font-bold text-slate-900">
-            Recent payments
-          </h2>
+        {/* 7. Recent Payments List at the Bottom (Shown only when a wallet is connected) */}
+        {walletAddress && (
+          <section className="pt-4 border-t border-slate-100 space-y-3">
+            <h2 className="text-base font-bold text-slate-900">
+              Recent payments
+            </h2>
 
-          {paymentHistory.length === 0 ? (
-            <div className="rounded-3xl bg-slate-50 border border-slate-200/80 p-6 text-center space-y-1.5">
-              <Clock className="w-6 h-6 text-slate-400 mx-auto" />
-              <div className="text-base font-semibold text-slate-700">
-                No payments yet
+            {walletPayments.length === 0 ? (
+              <div className="rounded-3xl bg-slate-50 border border-slate-200/80 p-6 text-center space-y-1.5">
+                <Clock className="w-6 h-6 text-slate-400 mx-auto" />
+                <p className="text-sm font-medium text-slate-600">
+                  No payments yet. Your first one will show here.
+                </p>
               </div>
-              <p className="text-sm text-slate-500">
-                Your completed payment receipts will show up here.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {paymentHistory.map((item) => {
-                const relTime = formatRelativeTime(item.timestamp, nowMs);
-                return (
-                  <div
-                    key={item.id}
-                    className="rounded-2xl bg-slate-50 p-4 flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-semibold text-slate-900 truncate">
-                          {formatRecipientDisplay(item)}
-                        </span>
-                        {relTime && (
-                          <span className="text-sm text-slate-400 shrink-0">
-                            · {relTime}
+            ) : (
+              <div className="space-y-2.5">
+                {walletPayments.map((item) => {
+                  const relTime = formatRelativeTime(item.timestamp, nowMs);
+                  return (
+                    <div
+                      key={item.id}
+                      className="rounded-2xl bg-slate-50 p-4 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-semibold text-slate-900 truncate">
+                            {formatRecipientDisplay(item)}
                           </span>
+                          {relTime && (
+                            <span className="text-sm text-slate-400 shrink-0">
+                              · {relTime}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm text-slate-500">
+                          {item.amountNgn.toLocaleString('en-US')} NGN · {item.amountSol} SOL
+                        </div>
+                        {item.note && (
+                          <div className="text-sm text-slate-500 truncate">
+                            Note: {item.note}
+                          </div>
                         )}
                       </div>
-                      <div className="text-sm text-slate-500">
-                        {item.amountNgn.toLocaleString('en-US')} NGN · {item.amountSol} SOL
-                      </div>
-                      {item.note && (
-                        <div className="text-sm text-slate-500 truncate">
-                          Note: {item.note}
-                        </div>
-                      )}
-                    </div>
 
-                    <a
-                      href={`https://explorer.solana.com/tx/${item.signature}?cluster=devnet`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="min-h-[44px] px-3 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 shrink-0"
-                    >
-                      <span>Proof</span>
-                      <ExternalLink className="w-4 h-4" />
-                    </a>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                      <a
+                        href={`https://explorer.solana.com/tx/${item.signature}?cluster=devnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-h-[44px] px-3 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 shrink-0"
+                      >
+                        <span>Proof</span>
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
       </main>
 
       {/* 8. Small "Need test SOL?" link to the devnet faucet at the very bottom */}
